@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.Orca.SignalFilter" path="/org/gnome/orca/signal-filter/">
+    <key name="enabled" type="b">
+      <default>true</default>
+      <summary>Enable Signal Desktop live region filtering</summary>
+    </key>
+    <key name="announce-sent" type="b">
+      <default>true</default>
+      <summary>Announce when a message is sent</summary>
+    </key>
+    <key name="announce-typing" type="b">
+      <default>true</default>
+      <summary>Announce typing indicators</summary>
+    </key>
+    <key name="announce-received" type="b">
+      <default>true</default>
+      <summary>Announce received messages</summary>
+    </key>
+    <key name="dedup-seconds" type="i">
+      <default>5</default>
+      <summary>Deduplication window in seconds</summary>
+    </key>
+    <key name="debug" type="b">
+      <default>false</default>
+      <summary>Log all Signal live region events to debug file</summary>
+    </key>
+  </schema>
+</schemalist>
