@@ -17,8 +17,13 @@ is typing. This add-on fixes all of that.
 2. **Announces messages cleanly**, exactly once each:
    - `Message sent.` when you send.
    - `Daniel: <text>` (or `<sender>: <text>` in groups) when one arrives.
-3. **Announces typing** — `Daniel is typing.` — keyed on Signal's real typing
-   bubble, with a safety timer so the state can never get stuck.
+3. **Announces typing**, group-aware:
+   - 1:1: `Daniel is typing.`
+   - group: names who is typing from the typing bubble's avatars —
+     `Alex and Bob are typing.`, `Alex, Bob and Carol are typing.`,
+     `Alex and others are typing.`
+   - and, when the indicator disappears without a message being sent,
+     `Daniel stopped typing.` (toggleable separately).
 
 It does this by reading Signal's **actual rendered DOM markers** through
 AT-SPI (message direction from `module-message--outgoing/incoming`, clean text

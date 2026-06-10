@@ -33,9 +33,15 @@ shipped app.asar bundle):
           <contact>" starts working with no code change.
 
   Typing bubble:  a new timeline child carrying class module-typing-animation
-                  with title/name "Typing animation for this chat".  There is
-                  no per-typer name in 1:1, so we use the conversation header
-                  contact (module-ConversationHeader__header__info__title).
+                  (and module-message--typing-bubble).  In a 1:1 chat there is
+                  no per-typer name, so we use the conversation header contact
+                  (module-ConversationHeader__header__info__title).  In a GROUP
+                  chat the bubble carries one module-message__typing-avatar per
+                  typist (accessible name = the contact) plus a "+N" overflow
+                  avatar, so we name who is typing ("Alex and Bob are typing.").
+                  Removals don't fire a reliable event, so while a bubble is up
+                  we poll the timeline; when it disappears without a message we
+                  announce "<who> stopped typing.".
 
 All patches and listeners are reversible via uninstall().
 """
@@ -86,9 +92,13 @@ _status_seen: dict[str, str] = {}                 # message uuid -> last status 
 _primed: bool = False
 _prime_next: bool = False
 _typing_active: bool = False
-_typing_clear_source: int | None = None           # auto-clear typing timeout
+_typing_subject: str | None = None                # spoken subject for current typing
+_typing_misses: int = 0                           # consecutive polls with no bubble
+_typing_poll_source: int | None = None            # typing-bubble poll timer
+_last_received_time: float = 0.0                  # time of last incoming message
 
 _scan_source: int | None = None                   # pending GLib timeout id
+_prime_source: int | None = None                  # one-shot post-install prime timer
 _dedup_cache: dict[str, float] = {}               # announcement backstop
 
 _settings_window = None
@@ -105,6 +115,11 @@ CLS_MSG_TEXT = "module-message__text"
 CLS_AUTHOR = "module-message__author"
 CLS_TYPING = "module-typing-animation"
 CLS_TYPING_BUBBLE = "module-message--typing-bubble"
+CLS_MSG_GROUP = "module-message--group"  # on the typing bubble only in group chats
+CLS_TYPING_AVATAR = "module-message__typing-avatar"  # one per typist; name = contact
+CLS_TYPING_AVATAR_SPACER = "module-message__typing-avatar-spacer"  # contains the above as a substring!
+CLS_TYPING_AVATAR_CONTAINER = "module-message__author-avatar-container--typing"
+CLS_TYPING_AVATAR_OVERFLOW = "--overflow-count"  # the "+N more typists" avatar
 CLS_TIMELINE = "module-timeline"  # base class of the outer timeline flex
 CLS_HEADER_TITLE = "module-ConversationHeader__header__info__title"
 CLS_HEADER_BTN = "module-ConversationHeader__header--clickable"
@@ -118,6 +133,8 @@ SCAN_DELAY_MS = 180        # debounce: scan this long after the last mutation
 SCAN_TAIL = 8              # how many trailing list children to inspect
 ANNOUNCE_MAX = 4           # > this many new at once => treat as bulk/history load
 SEEN_CAP = 1000            # bound the dedup set
+TYPING_POLL_MS = 1200      # how often to recheck whether the typing bubble is up
+TYPING_MESSAGE_WINDOW = 2.0  # don't say "stopped typing" within this long of a message
 
 # Bidi isolate / embedding controls Signal wraps names in (FSI/PDI/etc).
 _ISOLATES = dict.fromkeys(
@@ -445,6 +462,7 @@ def _remember(uuid: str) -> None:
 
 def _do_scan() -> None:
     global _cur_conv, _prime_next, _primed, _typing_active, _contact_name
+    global _message_list
 
     if not _config or not _config.enabled:
         return
@@ -461,6 +479,12 @@ def _do_scan() -> None:
         _cur_conv = conv
         _contact_name = None
         _prime_next = True
+        # Force a fresh re-find next scan, so we can never read a stale (but
+        # still technically valid) list node belonging to the previous chat.
+        _message_list = None
+        # Don't carry a typing state across a chat switch (it would later
+        # mis-announce "stopped typing" for the conversation we just left).
+        _end_typing(announce=False)
 
     try:
         n = AXObject.get_child_count(mlist)
@@ -470,12 +494,9 @@ def _do_scan() -> None:
     new_msgs: list[dict] = []
     read_events: list[str] = []  # uuids newly read (dormant until exposed)
 
-    # Typing bubble lives as a sibling of the message list, inside the timeline
-    # container -- search the whole timeline, not just the list's children.
-    tl = _timeline_root(mlist, root)
-    typing_present = _find_descendant(
-        tl, _typing_node, max_depth=22, max_nodes=4000
-    ) is not None
+    # Bounded check for the typing bubble (a backup for the event-driven start;
+    # the poll, not the scan, decides when typing has STOPPED).
+    typing_present = _typing_present(mlist, root)
 
     for i in range(max(0, n - SCAN_TAIL), n):
         child = AXObject.get_child(mlist, i)
@@ -507,46 +528,277 @@ def _do_scan() -> None:
                 _status_seen[uuid] = state
 
     _debug(f"scan: children={n} typing={typing_present} new={len(new_msgs)}")
-    _handle_typing(typing_present, root)
+    # Only let the scan START typing once the conversation is primed.  A typing
+    # bubble that is already up when you open/switch a chat must not latch here
+    # (it would later mis-announce "stopped typing" for state you never asked to
+    # hear).  Live typing that begins while you are in the chat still starts via
+    # the children-changed event, which is not gated this way.
+    if typing_present and not _typing_active and _primed and not _prime_next:
+        _on_typing_start(root)
     _handle_new_messages(new_msgs, root)
     _handle_read(read_events, root)
 
 
-def _clear_typing() -> bool:
-    global _typing_active, _typing_clear_source
-    _typing_active = False
-    _typing_clear_source = None
+# ---------------------------------------------------------------------------
+# Typing: group-aware "is typing" + poll-based "stopped typing"
+# ---------------------------------------------------------------------------
+
+def _named_descendants(root, max_depth=6, max_nodes=80, limit=6) -> list[str]:
+    """Names of the first few NAMED nodes under root, in document order, without
+    descending into a named node.  Chromium prunes unlabeled plain divs, so the
+    node actually carrying a name may sit at an unpredictable depth."""
+    out: list[str] = []
+    stack = [(root, 0)]
+    budget = max_nodes
+    while stack and budget > 0 and len(out) < limit:
+        o, d = stack.pop()
+        budget -= 1
+        nm = _strip(AXObject.get_name(o))
+        if nm:
+            out.append(nm)
+            continue
+        if d < max_depth:
+            cnt = AXObject.get_child_count(o)
+            for i in range(min(cnt, 8) - 1, -1, -1):
+                ch = AXObject.get_child(o, i)
+                if ch is not None:
+                    stack.append((ch, d + 1))
+    return out
+
+
+def _typing_names(mlist, root):
+    """Read who is typing from the typing bubble's avatars (group chats).
+    Returns (names, overflow, is_group).  A 1:1 bubble has no avatars and no
+    --group class, so it returns ([], False, False)."""
+    if mlist is None:
+        return [], False, False
+
+    avatars: list = []
+    containers: list = []
+    is_group = False
+
+    def gather(start):
+        nonlocal is_group
+        stack = [(start, 0)]
+        budget = 120
+        while stack and budget > 0:
+            o, d = stack.pop()
+            budget -= 1
+            c = _cls(o)
+            if CLS_MESSAGE_LIST in c:
+                continue  # never crawl the message list
+            if CLS_TYPING_BUBBLE in c and CLS_MSG_GROUP in c:
+                is_group = True
+            if CLS_TYPING_AVATAR_SPACER in c:
+                # The spacer's class CONTAINS the avatar class as a substring;
+                # skip it before the avatar check or it becomes a phantom avatar.
+                continue
+            if CLS_TYPING_AVATAR in c:
+                avatars.append(o)
+                continue
+            if CLS_TYPING_AVATAR_CONTAINER in c:
+                containers.append(o)
+            if d < 8:
+                cnt = AXObject.get_child_count(o)
+                # Reverse push so the LIFO pops children in document order.
+                for i in range(min(cnt, 8) - 1, -1, -1):
+                    ch = AXObject.get_child(o, i)
+                    if ch is not None:
+                        stack.append((ch, d + 1))
+
+    try:
+        n = AXObject.get_child_count(mlist)
+    except Exception:
+        n = 0
+    for i in range(n - 1, max(-1, n - 1 - 3), -1):
+        ch = AXObject.get_child(mlist, i)
+        if ch is not None:
+            gather(ch)
+    tl = _timeline_root(mlist, root)
+    if tl is not None and tl is not mlist:
+        try:
+            rn = AXObject.get_child_count(tl)
+        except Exception:
+            rn = 0
+        for i in range(rn - 1, max(-1, rn - 1 - 3), -1):
+            ch = AXObject.get_child(tl, i)
+            if ch is not None and ch is not mlist:
+                gather(ch)
+
+    names: list[str] = []
+    overflow = False
+    for av in avatars:
+        if CLS_TYPING_AVATAR_OVERFLOW in _cls(av):
+            overflow = True
+            continue
+        nm = _strip(AXObject.get_name(av))
+        if not nm:
+            # The avatar div itself is usually unlabeled; the name sits on a
+            # labelled node somewhere below it.
+            inner = _named_descendants(av, max_depth=5, max_nodes=40, limit=1)
+            nm = inner[0] if inner else ""
+        if nm and nm not in names:
+            names.append(nm)
+
+    if not names and containers:
+        # Chromium may prune the unlabeled per-typist avatar divs entirely (it
+        # does this to Signal's status icon), leaving only labelled nodes.  Read
+        # named descendants directly; a bare "+N" name is the overflow indicator.
+        for cont in containers:
+            for nm in _named_descendants(cont, max_depth=6, max_nodes=80, limit=6):
+                if re.fullmatch(r"\+\s*\d{1,3}", nm):
+                    overflow = True
+                    continue
+                if nm not in names:
+                    names.append(nm)
+
+    # Avatars/containers only render in group chats, so they also prove
+    # group-ness even if the --group class was missed.
+    is_group = is_group or bool(avatars) or bool(containers)
+    _debug(
+        f"typing names: avatars={len(avatars)} containers={len(containers)} "
+        f"names={names!r} overflow={overflow} group={is_group}"
+    )
+    return names, overflow, is_group
+
+
+def _build_typing_subject(names, overflow):
+    """Build the spoken subject + a plural flag from the typist names."""
+    if not names:
+        return "Someone", False
+    if overflow or len(names) > 3:
+        return f"{names[0]} and others", True
+    if len(names) == 1:
+        return names[0], False
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}", True
+    return f"{names[0]}, {names[1]} and {names[2]}", True
+
+
+def _typing_present(mlist, root) -> bool:
+    """Cheap, bounded check for the typing bubble.  Looks only at the last few
+    children of the message list and the timeline region, and never crawls into
+    the message list itself (which can hold hundreds of nodes)."""
+
+    def has_typing(node):
+        if CLS_MESSAGE_LIST in _cls(node):
+            return False  # the messages list/container -- don't crawl it
+        return _typing_node(node) or _find_descendant(
+            node, _typing_node, max_depth=6, max_nodes=80
+        ) is not None
+
+    try:
+        n = AXObject.get_child_count(mlist)
+    except Exception:
+        n = 0
+    for i in range(n - 1, max(-1, n - 1 - 4), -1):
+        ch = AXObject.get_child(mlist, i)
+        if ch is not None and has_typing(ch):
+            return True
+    tl = _timeline_root(mlist, root)
+    if tl is not None and tl is not mlist:
+        try:
+            rn = AXObject.get_child_count(tl)
+        except Exception:
+            rn = 0
+        for i in range(rn - 1, max(-1, rn - 1 - 4), -1):
+            ch = AXObject.get_child(tl, i)
+            if ch is not None and ch is not mlist and has_typing(ch):
+                return True
     return False
 
 
-def _handle_typing(present: bool, root) -> None:
-    global _typing_active, _typing_clear_source
+def _on_typing_start(root) -> None:
+    """The typing bubble appeared: announce who is typing (group-aware) and
+    start polling so we can later announce 'stopped typing'."""
+    global _typing_active, _typing_subject, _typing_misses
+    if not _config or not _config.enabled:
+        return
+    announce_start = _config.announce_typing
+    # Latch typing even when the start announcement is off, so the independent
+    # "stopped typing" option still works on its own.
+    if not (announce_start or _config.announce_typing_stopped):
+        return
+    if not _typing_active:
+        _typing_active = True
+        mlist = _get_message_list(root)
+        names, overflow, is_group = _typing_names(mlist, root)
+        if names:
+            subject, plural = _build_typing_subject(names, overflow)
+        elif is_group:
+            # A group whose typist names we couldn't read.  Announcing the
+            # GROUP'S name as if the group itself were typing sounds wrong.
+            subject, plural = "Someone", False
+        else:
+            subject, plural = (_get_contact(root) or "Someone"), False
+        _typing_subject = subject
+        if announce_start:
+            if plural:
+                _announce(f"{subject} are typing.")
+            else:
+                _announce(f"{subject} is typing.")
+    # A fresh typing event means they're still at it -- reset the miss count.
+    _typing_misses = 0
+    _start_typing_poll()
+
+
+def _start_typing_poll() -> None:
+    global _typing_poll_source
+    if _typing_poll_source is not None:
+        try:
+            GLib.source_remove(_typing_poll_source)
+        except Exception:
+            pass
+    _typing_poll_source = GLib.timeout_add(TYPING_POLL_MS, _poll_typing)
+
+
+def _poll_typing() -> bool:
+    global _typing_poll_source, _typing_misses
+    _typing_poll_source = None
+    if not _typing_active:
+        return False
+    root = _root()
+    mlist = _get_message_list(root) if root is not None else None
+    present = mlist is not None and _typing_present(mlist, root)
     if present:
-        if not _typing_active:
-            _typing_active = True
-            if _config.announce_typing:
-                who = _get_contact(root) or "Someone"
-                _announce(f"{who} is typing.")
-        # (Re)arm a safety auto-clear: the "stopped typing" remove event can
-        # arrive with a defunct node, so never let the flag stick.
-        if _typing_clear_source is not None:
-            try:
-                GLib.source_remove(_typing_clear_source)
-            except Exception:
-                pass
-        _typing_clear_source = GLib.timeout_add_seconds(12, _clear_typing)
-    else:
-        if _typing_clear_source is not None:
-            try:
-                GLib.source_remove(_typing_clear_source)
-            except Exception:
-                pass
-            _typing_clear_source = None
-        _typing_active = False
+        _typing_misses = 0
+        _start_typing_poll()
+        return False
+    # Require two consecutive absences before declaring "stopped", so a single
+    # transient miss doesn't misfire.
+    _typing_misses += 1
+    if _typing_misses < 2:
+        _start_typing_poll()
+        return False
+    # Gone.  Suppress "stopped" if the bubble vanished because a message just
+    # arrived (typing became a message), or if we couldn't verify the timeline.
+    recent_message = (time.time() - _last_received_time) < TYPING_MESSAGE_WINDOW
+    _end_typing(announce=(mlist is not None and not recent_message), root=root)
+    return False
+
+
+def _end_typing(announce: bool, root=None) -> None:
+    global _typing_active, _typing_misses, _typing_poll_source, _typing_subject
+    was_active = _typing_active
+    _typing_active = False
+    _typing_misses = 0
+    if _typing_poll_source is not None:
+        try:
+            GLib.source_remove(_typing_poll_source)
+        except Exception:
+            pass
+        _typing_poll_source = None
+    if (announce and was_active and _config
+            and _config.announce_typing_stopped):
+        # Reuse the subject announced for "is typing" (names in a group, contact
+        # in a 1:1); "stopped typing" reads fine for both.
+        who = _typing_subject or (_get_contact(root) if root else None) or "Someone"
+        _announce(f"{who} stopped typing.")
+    _typing_subject = None
 
 
 def _handle_new_messages(msgs: list[dict], root) -> None:
-    global _prime_next, _primed
+    global _prime_next, _primed, _last_received_time
 
     if not msgs:
         return
@@ -572,6 +824,10 @@ def _handle_new_messages(msgs: list[dict], root) -> None:
             if _config.announce_sent:
                 _announce("Message sent.")
         else:
+            # Incoming: the sender's typing just ended by becoming this message,
+            # so clear typing WITHOUT a "stopped typing" announcement.
+            _last_received_time = time.time()
+            _end_typing(announce=False, root=root)
             if _config.announce_received:
                 if m["author"]:
                     _announce(f"{m['author']}: {m['text']}")
@@ -638,6 +894,14 @@ def _scan_fire() -> bool:
     return False
 
 
+def _prime_fire() -> bool:
+    """One-shot: silently prime the open conversation once Orca has settled."""
+    global _prime_source
+    _prime_source = None
+    _scan_fire()
+    return False
+
+
 def _on_children_changed(event) -> None:
     global _recent_source
     try:
@@ -659,11 +923,11 @@ def _on_children_changed(event) -> None:
             if _config.debug:
                 _debug(f"TYPING-EVT {etype} data={data_cls[:48]!r}")
             if etype.endswith("add"):
-                _handle_typing(True, _root())
+                _on_typing_start(_root())
                 return
-            if etype.endswith("remove"):
-                _handle_typing(False, _root())
-                return
+            # On removal we don't trust the (often defunct) payload to end
+            # typing; the poll detects the bubble's disappearance and announces
+            # "stopped typing".  Fall through.
 
         if not _relevant_source(source):
             return
@@ -745,7 +1009,7 @@ def _register_keybinding() -> bool:
 # ---------------------------------------------------------------------------
 
 def install() -> None:
-    global _config, _installed, _orig_handle_event, _listener
+    global _config, _installed, _orig_handle_event, _listener, _prime_source
 
     if _installed:
         return
@@ -762,7 +1026,7 @@ def install() -> None:
 
     GLib.idle_add(_register_keybinding)
     # Prime the currently-open conversation silently once Orca has settled.
-    GLib.timeout_add(1500, lambda: (_scan_fire(), False)[1])
+    _prime_source = GLib.timeout_add(1500, _prime_fire)
 
     _installed = True
     _log.info(
@@ -788,7 +1052,7 @@ def uninstall() -> None:
             pass
         _listener = None
 
-    for src_name in ("_scan_source", "_typing_clear_source"):
+    for src_name in ("_scan_source", "_typing_poll_source", "_prime_source"):
         src = globals().get(src_name)
         if src is not None:
             try:

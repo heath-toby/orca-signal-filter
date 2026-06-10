@@ -38,6 +38,7 @@ class Config:
         self.enabled: bool = True
         self.announce_sent: bool = True
         self.announce_typing: bool = True
+        self.announce_typing_stopped: bool = True
         self.announce_received: bool = True
         self.dedup_seconds: int = 5
         self.debug: bool = False
@@ -62,6 +63,9 @@ class Config:
         self.enabled = self._settings.get_boolean("enabled")
         self.announce_sent = self._settings.get_boolean("announce-sent")
         self.announce_typing = self._settings.get_boolean("announce-typing")
+        self.announce_typing_stopped = self._settings.get_boolean(
+            "announce-typing-stopped"
+        )
         self.announce_received = self._settings.get_boolean("announce-received")
         self.dedup_seconds = self._settings.get_int("dedup-seconds")
         self.debug = self._settings.get_boolean("debug")
@@ -73,6 +77,9 @@ class Config:
         self._settings.set_boolean("enabled", self.enabled)
         self._settings.set_boolean("announce-sent", self.announce_sent)
         self._settings.set_boolean("announce-typing", self.announce_typing)
+        self._settings.set_boolean(
+            "announce-typing-stopped", self.announce_typing_stopped
+        )
         self._settings.set_boolean("announce-received", self.announce_received)
         self._settings.set_int("dedup-seconds", self.dedup_seconds)
         self._settings.set_boolean("debug", self.debug)

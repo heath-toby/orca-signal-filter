@@ -245,6 +245,15 @@ class SignalFilterSettingsWindow(Gtk.Window):
         )
         listbox.add_row_with_widget(row, self._typing_switch)
 
+        # Announce typing stopped
+        row, self._typing_stopped_switch = _create_switch_row(
+            "Announce typing st_opped", self._config.announce_typing_stopped,
+            atk_name="Announce when the other person stops typing",
+            atk_desc="Say \"stopped typing\" when the typing indicator disappears "
+                     "without a message being sent",
+        )
+        listbox.add_row_with_widget(row, self._typing_stopped_switch)
+
         # Announce received
         row, self._received_switch = _create_switch_row(
             "Announce _received messages", self._config.announce_received,
@@ -318,6 +327,7 @@ class SignalFilterSettingsWindow(Gtk.Window):
         self._config.enabled = self._enable_switch.get_active()
         self._config.announce_sent = self._sent_switch.get_active()
         self._config.announce_typing = self._typing_switch.get_active()
+        self._config.announce_typing_stopped = self._typing_stopped_switch.get_active()
         self._config.announce_received = self._received_switch.get_active()
         self._config.dedup_seconds = self._dedup_spin.get_value_as_int()
         self._config.debug = self._debug_switch.get_active()
