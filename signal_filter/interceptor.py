@@ -60,9 +60,7 @@ gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi, GLib
 
 from orca import (
-    command_manager,
     focus_manager,
-    keybindings,
     live_region_presenter,
     presentation_manager,
 )
@@ -101,7 +99,6 @@ _scan_source: int | None = None                   # pending GLib timeout id
 _prime_source: int | None = None                  # one-shot post-install prime timer
 _dedup_cache: dict[str, float] = {}               # announcement backstop
 
-_settings_window = None
 
 # ---------------------------------------------------------------------------
 # Constants -- the real Signal markers
@@ -153,6 +150,9 @@ _STATUS_FROM_CLASS = {
 }
 
 # Debug log
+# Deliberately NOT inside the extension package: Orca approves an
+# extension by hashing every file in its directory and refuses to load it
+# if anything changed, so a log written at runtime has to live elsewhere.
 _DEBUG_LOG_DIR = os.path.join(ORCA_DIR, "signal_filter")
 _DEBUG_LOG_PATH = os.path.join(_DEBUG_LOG_DIR, "debug.log")
 
@@ -961,60 +961,23 @@ def _on_settings_saved(new_config: Config) -> None:
     _log.info("SignalFilter: settings updated")
 
 
-def _open_settings(_script, _event=None) -> bool:
-    global _settings_window
-    if _settings_window is not None:
-        try:
-            _settings_window.present()
-            return True
-        except Exception:
-            _settings_window = None
-
-    from .config_ui import show_settings_dialog
-    cfg = Config.load()
-
-    def _on_save(new_cfg):
-        global _settings_window
-        _settings_window = None
-        _on_settings_saved(new_cfg)
-
-    def _on_destroy(*_args):
-        global _settings_window
-        _settings_window = None
-
-    _settings_window = show_settings_dialog(cfg, on_save=_on_save)
-    if _settings_window is not None:
-        _settings_window.connect("destroy", _on_destroy)
-    return True
-
-
-def _register_keybinding() -> bool:
-    manager = command_manager.get_manager()
-    kb = keybindings.KeyBinding("s", keybindings.ORCA_SHIFT_MODIFIER_MASK)
-    manager.add_command(
-        command_manager.KeyboardCommand(
-            name="signalFilterSettings",
-            function=_open_settings,
-            group_label="Signal Filter",
-            description="Open Signal Filter settings",
-            desktop_keybinding=kb,
-            laptop_keybinding=kb,
-        )
-    )
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Install / uninstall
 # ---------------------------------------------------------------------------
 
-def install() -> None:
+def install(config=None) -> None:
+    """Start filtering. Called from the Extension's lifecycle hooks.
+
+    ``config`` is the Config the Extension owns, already bound to Orca's
+    per-extension settings store. It is optional only so that the older
+    orca-customizations.py entry point keeps working.
+    """
     global _config, _installed, _orig_handle_event, _listener, _prime_source
 
     if _installed:
         return
 
-    _config = Config.load()
+    _config = config if config is not None else Config.load()
 
     # 1. Silence Orca's own live-region announcements for Signal.
     _orig_handle_event = live_region_presenter.LiveRegionPresenter.handle_event
@@ -1024,7 +987,6 @@ def install() -> None:
     _listener = Atspi.EventListener.new(_on_children_changed)
     _listener.register("object:children-changed")
 
-    GLib.idle_add(_register_keybinding)
     # Prime the currently-open conversation silently once Orca has settled.
     _prime_source = GLib.timeout_add(1500, _prime_fire)
 

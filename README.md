@@ -44,10 +44,9 @@ that adds `aria-label` to the status indicator.
 
 ## Requirements
 
-- Orca (GNOME's screen reader)
+- Orca 51 or later, with user-extension support
 - Signal Desktop
-- Python 3, PyGObject (`gi`), GLib/GSettings — already present on a typical
-  Orca install.
+- Python 3 and PyGObject (`gi`) — already present on a typical Orca install.
 
 ## Install
 
@@ -56,8 +55,13 @@ that adds `aria-label` to the status indicator.
 orca --replace &        # restart Orca to load the add-on
 ```
 
-The installer copies the module into `~/.local/share/orca/`, registers a
-GSettings schema, and adds a loader to your `orca-customizations.py`.
+The installer copies the package into `~/.local/share/orca/extensions/` and
+approves it with `orca --approve-extension signal_filter`. Orca approves an
+extension by a hash over its contents, so re-run `./install.sh` after editing
+anything or Orca will decline to load it.
+
+Coming from 1.x, the installer also removes the old loader block from
+`orca-customizations.py`. Leaving it would load the add-on a second time.
 
 ## Uninstall
 
@@ -68,9 +72,19 @@ orca --replace &
 
 ## Settings
 
-Press **Orca + Shift + S** at any time to toggle: enabled, announce sent,
-announce typing, announce received, the de-duplication window, and a debug log
-(written to `~/.local/share/orca/signal_filter/debug.log`).
+Orca Preferences → **User Extensions** → **Signal Filter**. There is no
+dialog of this add-on's own and no keyboard shortcut: every setting is a
+plain toggle or a number, so they are declared to Orca and it generates the
+pane itself.
+
+- **enabled**
+- **announce sent**, **announce received**, **announce typing**,
+  **announce typing stopped**
+- **dedup seconds** — how long an identical announcement is suppressed for
+- **debug** — writes to `~/.local/share/orca/signal_filter/debug.log`
+
+Settings from 1.x are imported once, from the old
+`org.gnome.Orca.SignalFilter` GSettings schema, the first time 2.0 runs.
 
 ## How it works
 
