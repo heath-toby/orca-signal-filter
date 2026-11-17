@@ -10,7 +10,7 @@ Every setting is a plain toggle or a number, so it declares them to Orca
 and uses the pane Orca generates in Preferences -> User Extensions.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 import logging
 
@@ -57,7 +57,7 @@ class SignalFilter(Extension):
 
     GROUP_LABEL = "Signal Filter"
     DESCRIPTION = "Silences Signal Desktop's own live-region announcements and replaces them with clean typing, sent and received messages driven from the page itself."
-    VERSION = "2.0.0"  # keep in sync with __version__; read by AST, must be a literal
+    VERSION = "2.0.1"  # keep in sync with __version__; read by AST, must be a literal
     AUTHOR = "Toby"
     # Read by Orca without importing this module, and by Extension Updater
     # to find this add-on's releases. Orca shows it as a link in

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.1
+
+**`uninstall.sh --purge` was not removing the settings, and said it had.**
+
+Orca sanitises an extension's namespace for its settings path, and an
+underscore becomes a dash: the settings live under
+`extensions/signal-filter/`, not `extensions/signal_filter/`. The purge named
+the package, so it cleared nothing — and `dconf reset -f` succeeds on a path
+that does not exist, so the "Removed the extension settings" message printed
+either way.
+
+Fixed, and the messages now check whether there was anything there before
+claiming to have removed it. Every other add-on's uninstaller was checked for
+the same mistake; this was the only one with it.
+
 ## 2.0.0
 
 **An Orca 51 user extension, with Orca's own settings pane.**

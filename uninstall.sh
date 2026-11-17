@@ -14,6 +14,9 @@ ADDON_NAME="signal_filter"
 ORCA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/orca"
 ADDON_DIR="$ORCA_DIR/extensions/$ADDON_NAME"
 DATA_DIR="$ORCA_DIR/$ADDON_NAME"
+# Orca sanitises the namespace for the settings path, and an underscore
+# becomes a dash -- so the package is signal_filter and its dconf path is not.
+SETTINGS_NAME="signal-filter"
 CUSTOMIZATIONS="$ORCA_DIR/orca-customizations.py"
 
 BEGIN_MARKER="# --- signal-filter begin ---"
@@ -56,12 +59,25 @@ if [ "$PURGE" -eq 1 ]; then
         rm -rf "$DATA_DIR"
         info "Removed the debug log directory."
     fi
-    dconf reset -f /org/gnome/orca/default/extensions/signal_filter/ 2>/dev/null \
-        && info "Removed the extension settings." \
-        || info "No extension settings to remove."
-    dconf reset -f /org/gnome/orca/signal-filter/ 2>/dev/null \
-        && info "Removed the legacy org.gnome.Orca.SignalFilter settings." \
-        || info "No legacy settings to remove."
+    # Orca sanitises the namespace for the settings path, so the underscore
+    # in the package name becomes a dash: the settings are under
+    # extensions/signal-filter/, not extensions/signal_filter/. This reset
+    # named the package and so cleared nothing, and said it had -- `dconf
+    # reset -f` succeeds on a path that does not exist, so the success
+    # message was printed either way.
+    purge_dconf() {
+        local path="$1" what="$2"
+        if [ -n "$(dconf list "$path" 2>/dev/null)" ]; then
+            dconf reset -f "$path" 2>/dev/null \
+                && info "Removed $what." \
+                || info "Could not remove $what."
+        else
+            info "No $what to remove."
+        fi
+    }
+
+    purge_dconf "/org/gnome/orca/default/extensions/$SETTINGS_NAME/" "the extension settings"
+    purge_dconf "/org/gnome/orca/signal-filter/" "the legacy org.gnome.Orca.SignalFilter settings"
 else
     info "Settings and debug log kept. Re-run with --purge to remove them."
 fi
